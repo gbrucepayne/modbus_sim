@@ -2,6 +2,9 @@
 """
 A Modbus slave device used to simulate various RTU/PLC serial devices for testing.
 
+Sets up a simmple device construct with 10,000 of each type of register.
+Increments values on the input registers every 5 seconds.
+
 .. todo::
    Import mbs slave definitions built by `Modbus Slave <http://www.modbustools.com>`_ tool.
 
@@ -10,7 +13,6 @@ A Modbus slave device used to simulate various RTU/PLC serial devices for testin
 __version__ = "0.1.0"
 
 import sys
-import logging
 import argparse
 import serial
 import glob
@@ -18,7 +20,7 @@ import glob
 import headless
 from headless import RepeatingTimer
 
-from pymodbus import __version__ as py_ver
+from pymodbus import __version__ as pymodbus_version
 from pymodbus.server.async import StartTcpServer
 from pymodbus.server.async import StartUdpServer
 from pymodbus.server.async import StartSerialServer
@@ -28,22 +30,12 @@ from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSparseDataBlock
 from pymodbus.datastore import ModbusSlaveContext, ModbusServerContext
 from pymodbus.transaction import ModbusRtuFramer, ModbusAsciiFramer, ModbusSocketFramer
 
-# Serial Port Defaults
-# serial_port = '/dev/ttyUSB0'
-# serial_baud = 9600
-# serial_bytesize = serial.EIGHTBITS
-# serial_parity = serial.PARITY_NONE
-# serial_stopbits = serial.STOPBITS_ONE
+PORT_DEFAULT = 'tcp'
 
 # --------------------------------------------------------------------------- #
 # configure the service logging
 # --------------------------------------------------------------------------- #
-# FORMAT = ('%(asctime)-15s %(threadName)-15s'
-#           ' %(levelname)-8s %(module)-15s:%(lineno)-8s %(message)s')
-# logging.basicConfig(format=FORMAT)
-# log = logging.getLogger()
-# log.setLevel(logging.DEBUG)
-log = headless.get_wrapping_log(debug=True)
+log = headless.get_wrapping_log(debug=False)
 
 # Modbus function code reference:
 READ_CO = 0x01
@@ -174,18 +166,31 @@ class CallbackDataBlock(ModbusSparseDataBlock):
 
 
 def get_slave_context(device='Default'):
+    """
+    Creates a Modbus slave context based on an input template
+
+    :param device: a device template
+    :return: ModbusSlaveContext
+
+    """
     log.debug("Getting slave context")
     supported_devices = ['Default']
+    if device not in supported_devices:
+        raise EnvironmentError("Unsupported Device Template: " + device)
+    default_hr = 10000
+    default_ir = 10000
+    default_di = 10000
+    default_co = 10000
     default_hr_value = 3
     default_ir_value = 2
     default_di_value = 1
     default_co_value = 0
     if device in supported_devices:
         # TODO: Create reference/test devices
-        hr_block = ModbusSequentialDataBlock(0, [default_hr_value for x in range(10000)])
-        ir_block = ModbusSequentialDataBlock(0, [default_ir_value for x in range(10000)])
-        di_block = ModbusSequentialDataBlock(0, [default_di_value for x in range(10000)])
-        co_block = ModbusSequentialDataBlock(0, [default_co_value for x in range(10000)])
+        hr_block = ModbusSequentialDataBlock(0, [default_hr_value for x in range(default_hr)])
+        ir_block = ModbusSequentialDataBlock(0, [default_ir_value for x in range(default_ir)])
+        di_block = ModbusSequentialDataBlock(0, [default_di_value for x in range(default_di)])
+        co_block = ModbusSequentialDataBlock(0, [default_co_value for x in range(default_co)])
         return ModbusSlaveContext(hr=hr_block, ir=ir_block, di=di_block, co=co_block)
     else:
         raise NotImplementedError('Target Modbus device not supported.')
@@ -193,7 +198,8 @@ def get_slave_context(device='Default'):
 
 def update_values(server_contexts):
     """
-    Updates the configured register values in the Modbus context
+    Updates the configured register values in the Modbus context.
+    Increments 5 input register values starting at address 0x00, by 1
 
     .. todo::
        INCOMPLETE, scale up and support device templates
@@ -202,14 +208,17 @@ def update_values(server_contexts):
 
     """
     context = server_contexts[0]
-    function_code = 0x03
+    function_code = READ_IR
     slave_id = 0x01
     address = 0x00
-    count = 1
+    count = 5
     get_values = context[slave_id].getValues(function_code, address, count=count)
     set_values = [v + 1 for v in get_values]
-    log.debug("Modbus slave updating. New values:" + str(set_values))
-    context[slave_id].setValues(function_code, address, set_values)   # the index here confuses me!?
+    # TODO: structure a more meaningful information output for updated registers
+    log.info("Modbus slave updating Slave:{slave} Function:{func} Address:{add}. New values:{vals}".format(
+        slave=slave_id, func=function_code, add=address, vals=str(set_values).replace(',', ' ')
+    ))
+    context[slave_id].setValues(function_code, address, set_values)
 
 
 def list_serial_ports():
@@ -259,9 +268,6 @@ def get_parser():
     """
     parser = argparse.ArgumentParser(description="Modbus Slave Device.")
 
-    # TODO: determine environment to set defaults e.g. /dev/ttyUSB0 for RPi, TCP for PC
-    # PORT_DEFAULT = '/dev/ttyUSB0'   # Raspberry Pi
-    PORT_DEFAULT = 'tcp'
     port_choices = list_serial_ports() + ['tcp', 'udp']
 
     parser.add_argument('-p', '--port', dest='port', default=PORT_DEFAULT,
@@ -369,12 +375,12 @@ def run_async_server():
     identity.VendorUrl = 'http://github.com/bashwork/pymodbus/'
     identity.ProductName = 'Pymodbus Server'
     identity.ModelName = 'Pymodbus Server'
-    identity.MajorMinorRevision = py_ver
+    identity.MajorMinorRevision = pymodbus_version
 
     # Set up looping call to update values
     UPDATE_INTERVAL = 5
     slave_updater = RepeatingTimer(seconds=UPDATE_INTERVAL, name='slave_updater',
-                                   callback=update_values, args=(context,), defer=False)
+                                   callback=update_values, args=(context,), defer=True)
     slave_updater.start_timer()
 
     if user_options.mode == 'tcp' or user_options.mode is None and user_options.port.lower() == 'tcp':
@@ -384,6 +390,7 @@ def run_async_server():
     else:
         framer = ModbusRtuFramer
 
+    # TODO: trap master connect/disconnect as INFO logs rather than DEBUG (default of pyModbus)
     if user_options.port.lower() == 'tcp':
         StartTcpServer(context, identity=identity, address=("localhost", TCP_PORT), framer=framer)
     elif user_options.port.lower() == 'udp':

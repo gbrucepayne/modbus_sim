@@ -21,7 +21,7 @@ def get_wrapping_log(logfile=None, file_size=5, debug=False):
     :return: ``log`` object
 
     """
-    FORMAT = ('%(asctime)s.%(msecs)03dZ,[%(levelname)-7s],(%(threadName)-10s),'
+    FORMAT = ('%(asctime)s.%(msecs)03dZ,[%(levelname)s],(%(threadName)-10s),'
               '%(module)s.%(funcName)s:%(lineno)d,%(message)s')
     log_formatter = logging.Formatter(fmt=FORMAT,
                                       datefmt='%Y-%m-%dT%H:%M:%S')
