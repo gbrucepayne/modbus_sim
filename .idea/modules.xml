@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/modbus-device.iml" filepath="$PROJECT_DIR$/.idea/modbus-device.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modbus_sim.iml" filepath="$PROJECT_DIR$/.idea/modbus_sim.iml" />
     </modules>
   </component>
 </project>

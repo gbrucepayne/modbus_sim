@@ -1,20 +1,24 @@
 #!/usr/bin/env python
 """
 A Modbus slave device used to simulate various RTU/PLC serial devices for testing.
-Ideally will import mbs slave definitions build by Modbus Slave tool.
+
+.. todo::
+   Import mbs slave definitions built by `Modbus Slave <http://www.modbustools.com>`_ tool.
+
 """
 
 __version__ = "0.1.0"
 
 import sys
 import logging
-import traceback
 import argparse
 import serial
 import glob
 
-# from twisted.internet.task import LoopingCall
+import headless
+from headless import RepeatingTimer
 
+from pymodbus import __version__ as py_ver
 from pymodbus.server.async import StartTcpServer
 from pymodbus.server.async import StartUdpServer
 from pymodbus.server.async import StartSerialServer
@@ -22,23 +26,24 @@ from pymodbus.server.async import StartSerialServer
 from pymodbus.device import ModbusDeviceIdentification
 from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSparseDataBlock
 from pymodbus.datastore import ModbusSlaveContext, ModbusServerContext
-from pymodbus.transaction import ModbusRtuFramer, ModbusAsciiFramer
+from pymodbus.transaction import ModbusRtuFramer, ModbusAsciiFramer, ModbusSocketFramer
 
 # Serial Port Defaults
-serial_port = '/dev/ttyUSB0'
-serial_baud = 9600
-serial_bytesize = serial.EIGHTBITS
-serial_parity = serial.PARITY_NONE
-serial_stopbits = serial.STOPBITS_ONE
+# serial_port = '/dev/ttyUSB0'
+# serial_baud = 9600
+# serial_bytesize = serial.EIGHTBITS
+# serial_parity = serial.PARITY_NONE
+# serial_stopbits = serial.STOPBITS_ONE
 
 # --------------------------------------------------------------------------- #
 # configure the service logging
 # --------------------------------------------------------------------------- #
-FORMAT = ('%(asctime)-15s %(threadName)-15s'
-          ' %(levelname)-8s %(module)-15s:%(lineno)-8s %(message)s')
-logging.basicConfig(format=FORMAT)
-log = logging.getLogger()
-log.setLevel(logging.DEBUG)
+# FORMAT = ('%(asctime)-15s %(threadName)-15s'
+#           ' %(levelname)-8s %(module)-15s:%(lineno)-8s %(message)s')
+# logging.basicConfig(format=FORMAT)
+# log = logging.getLogger()
+# log.setLevel(logging.DEBUG)
+log = headless.get_wrapping_log(debug=True)
 
 # Modbus function code reference:
 READ_CO = 0x01
@@ -64,6 +69,9 @@ class Device(object):
 class Slave(object):
     """
     Data model for a Modbus Slave (e.g. RTU, PLC)
+
+    .. todo::
+       NOT IMPLEMENTED
 
     :param identity: ``pymodbus.device.ModbusDeviceIdentification`` object
     :param slave_id: (number) Network ID of the slave
@@ -166,10 +174,11 @@ class CallbackDataBlock(ModbusSparseDataBlock):
 
 
 def get_slave_context(device='Default'):
+    log.debug("Getting slave context")
     supported_devices = ['Default']
-    default_hr_value = 9999
-    default_ir_value = 9999
-    default_di_value = 0
+    default_hr_value = 3
+    default_ir_value = 2
+    default_di_value = 1
     default_co_value = 0
     if device in supported_devices:
         # TODO: Create reference/test devices
@@ -182,22 +191,25 @@ def get_slave_context(device='Default'):
         raise NotImplementedError('Target Modbus device not supported.')
 
 
-def update_values(server_context):
+def update_values(server_contexts):
     """
-    Updates the configured register values
+    Updates the configured register values in the Modbus context
 
-    :param server_context: a ``ModbusServerContext``
-    :return:
+    .. todo::
+       INCOMPLETE, scale up and support device templates
+
+    :param server_contexts: a ``ModbusServerContext``
+
     """
-    context = server_context[0]
+    context = server_contexts[0]
     function_code = 0x03
     slave_id = 0x01
     address = 0x00
     count = 1
-    set_values = []   # number of entries should match ``count``
-    context[slave_id].setValues(function_code, address, set_values)   # the index here confuses me!?
     get_values = context[slave_id].getValues(function_code, address, count=count)
-    log.debug("values set:" + str(get_values))
+    set_values = [v + 1 for v in get_values]
+    log.debug("Modbus slave updating. New values:" + str(set_values))
+    context[slave_id].setValues(function_code, address, set_values)   # the index here confuses me!?
 
 
 def list_serial_ports():
@@ -229,6 +241,15 @@ def list_serial_ports():
     return result
 
 
+class SerialPort(object):
+    def __init__(self, port='/dev/ttyUSB0', baudrate=9600, bytesize=8, parity='none', stopbits=1):
+        self.port = port
+        self.baudrate = baudrate
+        self.bytesize = bytesize
+        self.parity = parity
+        self.stopbits = stopbits
+
+
 def get_parser():
     """
     Parses the command line arguments.
@@ -238,17 +259,26 @@ def get_parser():
     """
     parser = argparse.ArgumentParser(description="Modbus Slave Device.")
 
-    parser.add_argument('-p', '--port', dest='port', default='/dev/ttyUSB0',
-                        help="tcp, udp or a USB/serial port name")
+    # TODO: determine environment to set defaults e.g. /dev/ttyUSB0 for RPi, TCP for PC
+    # PORT_DEFAULT = '/dev/ttyUSB0'   # Raspberry Pi
+    PORT_DEFAULT = 'tcp'
+    port_choices = list_serial_ports() + ['tcp', 'udp']
 
-    parser.add_argument('-b', '--baud', dest='baud', default=9600, type=int,
-                        help="serial port baud rate")
+    parser.add_argument('-p', '--port', dest='port', default=PORT_DEFAULT,
+                        choices=port_choices,
+                        help="tcp:502, udp:5020, or a USB/serial port name")
+
+    parser.add_argument('-b', '--baud', default=9600, type=int,
+                        choices=[2400, 4800, 9600, 19200, 38400, 57600, 115200],
+                        help="baud rate (``int`` default 9600)", metavar="{2400..115200}")
 
     parser.add_argument('-f', '--framing', dest='framing', default='8N1',
+                        choices=['8N1'],
                         help="serial port framing (byte size, parity, stop bits)")
 
-    parser.add_argument('-a', '--ascii', action='store_true',
-                        help="use ASCII mode (default RTU mode)")
+    parser.add_argument('-m', '--mode', dest='mode', default=None,
+                        choices=['rtu', 'ascii', 'tcp'],
+                        help="Modbus framing mode RTU, ASCII or TCP")
 
     parser.add_argument('--logfile', default=None,
                         help="the log file name with optional extension (default extension .log)")
@@ -257,13 +287,15 @@ def get_parser():
                         help="the maximum log file size, in MB (default 5 MB)")
 
     parser.add_argument('--debug', action='store_true',
-                        help="enable verbose debug logging (default OFF)")
+                        help="enable tick_log debug logging (default OFF)")
 
     return parser
 
 
 def run_async_server():
-    """"""
+    """
+    Runs the Modbus asynchronous server
+    """
     parser = get_parser()
     user_options = parser.parse_args()
     TCP_PORT = 502
@@ -322,40 +354,52 @@ def run_async_server():
     #
     #     store = ModbusSlaveContext(..., zero_mode=True)
     # ----------------------------------------------------------------------- #
+
     slaves = {
-        0x01: get_slave_context()
+        0x01: get_slave_context(),
     }
     context = ModbusServerContext(slaves=slaves, single=False)
+    # slaves = get_slave_context()
+    # context = ModbusServerContext(slaves=slaves, single=True)
 
     # initialize the server information (else defaulted to empty strings)
     identity = ModbusDeviceIdentification()
-    identity.VendorName = 'Pymodbus'
+    identity.VendorName = 'PyModbus'
     identity.ProductCode = 'PM'
     identity.VendorUrl = 'http://github.com/bashwork/pymodbus/'
     identity.ProductName = 'Pymodbus Server'
     identity.ModelName = 'Pymodbus Server'
-    identity.MajorMinorRevision = '1.5'
+    identity.MajorMinorRevision = py_ver
 
     # Set up looping call to update values
+    UPDATE_INTERVAL = 5
+    slave_updater = RepeatingTimer(seconds=UPDATE_INTERVAL, name='slave_updater',
+                                   callback=update_values, args=(context,), defer=False)
+    slave_updater.start_timer()
 
-    # Server and Mode setup
-    mode = ModbusAsciiFramer if user_options.ascii else ModbusRtuFramer
-    if user_options.port.lower() == 'tcp':
-        StartTcpServer(context, identity=identity, address=("localhost", TCP_PORT),
-                       framer=mode)
-    if user_options.port.lower() == 'udp':
-        StartUdpServer(context, identity=identity, address=("127.0.0.1", UDP_PORT),
-                       framer=mode)
-    elif '/dev/tty' in user_options.port:
-        # todo: validate serial port selection beyond USB/serial default for RPi
-        serial_ports = list_serial_ports()
-        if user_options['port'] in serial_ports:
-            StartSerialServer(context, identity=identity, framer=mode, port=user_options.port,
-                              baudrate=9600, bytesize=8, parity='none', stopbits=1)  # need timeout=X?
-        else:
-            raise EnvironmentError('Unable to find specified serial port ' + user_options['port'])
+    if user_options.mode == 'tcp' or user_options.mode is None and user_options.port.lower() == 'tcp':
+        framer = ModbusSocketFramer
+    elif user_options.mode == 'ascii':
+        framer = ModbusAsciiFramer
     else:
-        print("Invalid port")
+        framer = ModbusRtuFramer
+
+    if user_options.port.lower() == 'tcp':
+        StartTcpServer(context, identity=identity, address=("localhost", TCP_PORT), framer=framer)
+    elif user_options.port.lower() == 'udp':
+        StartUdpServer(context, identity=identity, address=("127.0.0.1", UDP_PORT), framer=framer)
+    else:
+        if user_options.port in list_serial_ports():
+            ser = SerialPort()
+            StartSerialServer(context, identity=identity, framer=framer,
+                              port=ser.port,
+                              baudrate=ser.baudrate,
+                              bytesize=ser.bytesize,
+                              parity=ser.parity,
+                              stopbits=ser.stopbits,)  # need timeout=X?
+        else:
+            raise EnvironmentError('Unable to find specified serial port ' + user_options.port)
+    # '''
 
 
 if __name__ == "__main__":
