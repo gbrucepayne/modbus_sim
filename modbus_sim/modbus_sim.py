@@ -6,7 +6,23 @@ Sets up a simmple device construct with 10,000 of each type of register.
 Increments values on the input registers every 5 seconds.
 
 .. todo::
-   Import mbs slave definitions built by `Modbus Slave <http://www.modbustools.com>`_ tool.
+   Create several device CSV templates as examples.
+
+.. csvtable::
+
+   +------------+--------------+------+--------------+------------+----------+---------+---------------+-------------+----------+
+   | DaviceName | Manufacturer | Port | SerialConfig | ModbusMode | Function | Address | RegisterCount | Description | Encoding |
+   +------------+--------------+------+--------------+------------+----------+---------+---------------+-------------+----------+
+
+* **Port** is TCP, UDP or Serial
+* **SerialConfig** example 9600-8N1
+* **ModbusMode** TCP, RTU, ASCII
+* **Function** code e.g. 0x04 Read Input Registers
+* **Address** is the zero-mode address (e.g. PLC - 1)
+* **RegisterCount** is the number of contiguous registers representing a value
+* **Description** what the value represents
+* **DataType**
+* **Scale**
 
 """
 
@@ -33,11 +49,13 @@ from pymodbus.transaction import ModbusRtuFramer, ModbusAsciiFramer, ModbusSocke
 PORT_DEFAULT = 'tcp'
 
 # --------------------------------------------------------------------------- #
-# configure the service logging
+# Service logging configuration
 # --------------------------------------------------------------------------- #
 log = headless.get_wrapping_log(debug=False)
 
-# Modbus function code reference:
+# --------------------------------------------------------------------------- #
+# Modbus function code reference
+# --------------------------------------------------------------------------- #
 READ_CO = 0x01
 READ_DI = 0x02
 READ_HR = 0x03
@@ -49,10 +67,50 @@ WRITE_MULTI_HR = 0x10
 READ_EXCEPTION_STATUS = 0x07
 READ_DIAGNOSTICS = 0x08
 
+# --------------------------------------------------------------------------- #
+# File parser configuration
+# --------------------------------------------------------------------------- #
+TEMPLATE_PARSER_DESC = "/*DEVICE"
+TEMPLATE_PARSER_PORT = "port"
+TEMPLATE_PARSER_NETWORK = "deviceId"
+TEMPLATE_PARSER_REG_DESC = "/*REGISTER"
+TEMPLATE_PARSER_REG = "paramId"
+TEMPLATE_PARSER_SEPARATOR = ";"
 
-class Device(object):
-    def __init__(self):
-        pass
+DEFAULT_TEMPLATE = "/*DEVICE;VendorName=PyModbus;ProductCode=PM;VendorUrl=http://github.com/bashwork/pymodbus;" \
+                   "ProducName=PyModbus;ModelName=AsyncServer;MajorMinorRevision=1.0.0;sparse=1\n" \
+                   "port=tcp;mode=tcp\n" \
+                   "deviceId=1;networkId=1;plcBaseAddress=0\n" \
+                   "/*REGISTER;paramId=1;Name=Pressure;Default=100\n" \
+                   "paramId=1;deviceId=1;registerType=analog;address=0;encoding=int16\n" \
+                   "/*REGISTER;paramId=2;Name=HighPressure;Default=150\n" \
+                   "paramId=2;deviceId=1;registerType=holding;address=0;encoding=int16\n" \
+                   "/*REGISTER;paramId=3;Name=Indicator;Default=0\n" \
+                   "paramId=3;deviceId=1;registerType=input;address=0;encoding=boolean\n" \
+                   "/*REGISTER;paramId=4;Name=DoorOpen;Default=0\n" \
+                   "paramId=4;deviceId=1;registerType=coil;address=0;encoding=boolean\n" \
+                   "/*REGISTER;paramId=5;Name=Temperature;Default=22.5\n" \
+                   "paramId=5;deviceId=1;registerType=analog;address=1;encoding=float32\n"
+
+
+class DeviceEndpoint(object):
+    """
+    Data model for an endpoint device such as sensor or actuator
+    """
+    def __init__(self, name, device_type, register_type, register_address, value_range=None, units=None,
+                 value=None, refresh_interval=None):
+        self.name = name
+        self.device_types = ['sensor', 'actuator']
+        if device_type in self.device_types:
+            self.type = device_type
+        else:
+            raise EnvironmentError("Invalid device type {type}".format(type=type))
+        self.register_type = register_type
+        self.register_address = register_address
+        self.value_range = value_range
+        self.units = units
+        self.value = value
+        self.refresh_interval = refresh_interval
 
     def something(self):
         pass
@@ -63,49 +121,289 @@ class Slave(object):
     Data model for a Modbus Slave (e.g. RTU, PLC)
 
     .. todo::
-       NOT IMPLEMENTED
+       Document template format
 
-    :param identity: ``pymodbus.device.ModbusDeviceIdentification`` object
-    :param slave_id: (number) Network ID of the slave
-    :param register_map: ``pymodbus.datastore.ModbusSlaveContext`` object with registers and default values
-
-       - ``ModbusSequentialDataBlock`` or ``ModbusSparseDataBlock``
-       - assigned to ``di`` (Digital Inputs), ``co`` (Coils), ``ir`` (Input Registers), ``hr`` (Holding Registers)
-
-    :param devices: List of ``modbusslave.Device`` objects
+    :param template: a specifically formatted template or file
 
     """
-    def __init__(self, identity=None, slave_id=1, zero_mode=False, register_map=None, devices=None):
+    def __init__(self, template='DEFAULT'):
         """
         See Slave docstring
 
-        :param identity:
-        :param slave_id:
-        :param zero_mode:
-        :param register_map:
-        :param devices:
+        :param template: a specifically formatted template or file
+
         """
-        if identity is None:
-            identity = ModbusDeviceIdentification()
-            identity.VendorName = 'Pymodbus'
-            identity.ProductCode = 'PM'
-            identity.VendorUrl = 'http://github.com/bashwork/pymodbus/'
-            identity.ProductName = 'Pymodbus Server'
-            identity.ModelName = 'Pymodbus Server'
-            identity.MajorMinorRevision = '1.5'
-        self.identity = identity
-        self.slave_id = slave_id
-        self.zero_mode = zero_mode
-        if register_map is None:
-            register_map = ModbusSlaveContext(co=ModbusSequentialDataBlock.create(),
-                                              di=ModbusSequentialDataBlock.create(),
-                                              ir=ModbusSequentialDataBlock.create(),
-                                              hr=ModbusSequentialDataBlock.create(),
-                                              zero_mode=zero_mode)
-        self.register_map = register_map
-        if devices is None:
-            devices = [Device()]
-        self.devices = devices
+        self.template = template
+        self.identity = ModbusDeviceIdentification()
+        self.port = None
+        self.ser_config = None
+        self.mode = None
+        self.slave_id = None
+        self.zero_mode = True
+        self.registers = []
+        self.devices = []
+        self.context = None
+        self.parse_template()
+        self.sparse = False
+
+    def parse_template(self):
+        if self.template == 'DEFAULT':
+            file = DEFAULT_TEMPLATE
+        else:
+            # TODO: validate and open file as string
+            file = DEFAULT_TEMPLATE
+        lines = file.splitlines()
+        for line in lines:
+            if line[0:len(TEMPLATE_PARSER_DESC)] == TEMPLATE_PARSER_DESC:
+                id = line.split(TEMPLATE_PARSER_SEPARATOR)
+                for i in id:
+                    if i[0:len('VendorName')] == 'VendorName':
+                        self.identity.VendorName = i[len('VendorName')+1:]
+                    elif i[0:len('ProductCode')] == 'ProductCode':
+                        self.identity.ProductCode = i[len('ProductCode')+1:]
+                    elif i[0:len('VendorUrl')] == 'VendorUrl':
+                        self.identity.VendorUrl = i[len('VendorUrl')+1:]
+                    elif i[0:len('ProductName')] == 'ProductName':
+                        self.identity.ProductName = i[len('ProductName')+1:]
+                    elif i[0:len('ModelName')] == 'ModelName':
+                        self.identity.ModelName = i[len('ModelName')+1:]
+                    elif i[0:len('MajorMinorRevision')] == 'MajorMinorRevision':
+                        self.identity.MajorMinorRevision = i[len('MajorMinorRevision')+1:]
+                    elif i[0:len('sparse')].lower() == 'sparse':
+                        self.sparse = bool(int(i[len('sparse')+1:]))
+                if self.template == 'DEFAULT':
+                    self.identity.MajorMinorRevision = pymodbus_version
+            elif line[0:len(TEMPLATE_PARSER_NETWORK)] == TEMPLATE_PARSER_NETWORK:
+                net_info = line.split(TEMPLATE_PARSER_SEPARATOR)
+                for i in net_info:
+                    if i[0:len('networkId')] == 'networkId':
+                        net_id = int(i[len('networkId')+1:])
+                        if net_id in range (1, 254):
+                            self.slave_id = int(i[len('networkId')+1:])
+                        else:
+                            log.error("Invalid Modbus Slave ID {id}".format(id=net_id))
+                    elif i[0:len('plcBaseAddress')] == 'plcBaseAddress':
+                        plc = int(i[len('plcBaseAddress')+1:])
+                        self.zero_mode = False if plc == 1 else True
+            elif line[0:len(TEMPLATE_PARSER_PORT)] == TEMPLATE_PARSER_PORT:
+                port_info = line.split(TEMPLATE_PARSER_SEPARATOR)
+                for i in port_info:
+                    if i[0:len('port')] == 'port':
+                        log.info("port={port}".format(port=i[len('port')+1:]))
+                        port = i[len('port')+1:].lower()
+                        if port in ['tcp', 'udp']:
+                            self.port = port
+                        elif port in list_serial_ports():
+                            self.ser_config = SerialPort()
+                        else:
+                            raise EnvironmentError("Undefined port read from {template}".format(template=self.template))
+                    elif i[0:len('mode')] == 'mode':
+                        log.info("mode={mode}".format(mode=i[len('mode')+1:]))
+                        self.mode = i[len('mode')+1:]
+                        if self.mode not in ['rtu', 'ascii', 'tcp']:
+                            log.error("Undefined mode parsed from {template}".format(template=self.template))
+                            raise EnvironmentError("Undefined Modbus mode read from {template}"
+                                                   .format(template=self.template))
+                    elif i[0:len('baudRate')] == 'baudRate':
+                        log.info("baudRate={baudRate}".format(baudRate=i[len('baudRate')+1:]))
+                        baudrate = int(i[len('baudRate')+1:])
+                        if baudrate in self.ser_config.baudrates:
+                            self.ser_config.baudrate = baudrate
+                        else:
+                            log.error("Unsupported baud rate {baud}".format(baud=str(baudrate)))
+                    elif i[0:len('parity')] == 'parity':
+                        log.info("parity={parity}".format(parity=i[len('parity')+1:]))
+                        parity = i[len('parity')+1:]
+                        if parity not in ['none', 'even', 'odd']:
+                            self.ser_config.parity = parity
+                        else:
+                            log.error("Undefined parity {parity}".format(parity=parity))
+            elif line[0:len(TEMPLATE_PARSER_REG_DESC)] == TEMPLATE_PARSER_REG_DESC:
+                reg = self.Register()
+                reg_desc = line.split(TEMPLATE_PARSER_SEPARATOR)
+                for i in reg_desc:
+                    if i[0:len('paramId')] == 'paramId':
+                        reg.paramId = int(i[len('paramId')+1:])
+                    elif i[0:len('address')].lower() == 'address':
+                        addr = int(i[len('address') + 1:])
+                        if addr in range(0, 99999):
+                            reg.address = addr
+                        else:
+                            log.error("Invalid Modbus address {num}".format(num=addr))
+                    elif i[0:len('name')].lower() == 'name':
+                        reg.name = i[len('name') + 1:]
+                    elif i[0:len('default')].lower() == 'default':
+                        reg.default = i[len('default') + 1:]
+                self.registers.append(reg)
+            elif line[0:len(TEMPLATE_PARSER_REG)] == TEMPLATE_PARSER_REG:
+                # TODO: assign to proper objects, sort/group addresses by type and min/max
+                reg_config = line.split(TEMPLATE_PARSER_SEPARATOR)
+                reg_exists = False
+                this_reg = None
+                for c in reg_config:
+                    if c[0:len('paramId')] == 'paramId':
+                        paramId = int(c[len('paramId')+1:])
+                        for reg in self.registers:
+                            if paramId == reg.paramId:
+                                reg_exists = True
+                        if not reg_exists:
+                            reg = self.Register(paramId=paramId)
+                            self.registers.append(reg)
+                            reg_exists = True
+                        this_reg = paramId
+                    elif c[0:len('address')] == 'address':
+                        addr = int(c[len('address')+1:])
+                        if addr in range(0, 99999):
+                            for reg in self.registers:
+                                if reg.paramId == this_reg:
+                                    reg.address = addr
+                            if not reg_exists:
+                                reg = self.Register(address=addr)
+                                self.registers.append(reg)
+                                reg_exists = True
+                        else:
+                            log.error("Invalid Modbus address {num}".format(num=addr))
+                    elif c[0:len('registerType')] == 'registerType':
+                        reg_type = c[len('registerType')+1:]
+                        if reg_type in ['analog']:
+                            for reg in self.registers:
+                                if reg.paramId == this_reg:
+                                    reg.type = 'ir'
+                        elif reg_type in ['holding']:
+                            for reg in self.registers:
+                                if reg.paramId == this_reg:
+                                    reg.type = 'hr'
+                        elif reg_type in ['input']:
+                            for reg in self.registers:
+                                if reg.paramId == this_reg:
+                                    reg.type = 'di'
+                        elif reg_type in ['coil']:
+                            for reg in self.registers:
+                                if reg.paramId == this_reg:
+                                    reg.type = 'co'
+                        else:
+                            log.error("Unsupported registerType {type}".format(type=reg_type))
+                    elif c[0:len('encoding')] == 'encoding':
+                        enc = c[len('encoding')+1:]
+                        if enc in ['int16', 'int8', 'boolean']:
+                            for reg in self.registers:
+                                if reg.paramId == this_reg:
+                                    reg.encoding = enc
+                                    reg.default = int(reg.default)
+                        elif enc in ['float32', 'int32']:
+                            for reg in self.registers:
+                                if reg.paramId == this_reg:
+                                    reg.encoding = enc
+                                    reg.length = 2
+                                    reg.default = float(reg.default) if enc == 'float32' else int(reg.default)
+                        else:
+                            log.error("Unsupported encoding {type}".format(type=enc))
+
+        hr_sequential = []
+        hr_sparse_block = {}
+        ir_sequential = []
+        ir_sparse_block = {}
+        di_sequential = []
+        di_sparse_block = {}
+        co_sequential = []
+        co_sparse_block = {}
+        for reg in self.registers:
+            if reg.min is None:
+                reg.min = reg.get_range()[0]
+            if reg.max is None:
+                reg.max = reg.get_range()[1]
+            if reg.type == 'hr' and reg.address is not None:
+                if self.sparse:
+                    hr_sparse_block[reg.address] = reg.default
+                else:
+                    hr_sequential.append(reg.address)
+            elif reg.type == 'ir' and reg.address is not None:
+                if self.sparse:
+                    ir_sparse_block[reg.address] = reg.default
+                else:
+                    ir_sequential.append(reg.address)
+            elif reg.type == 'di' and reg.address is not None:
+                if self.sparse:
+                    di_sparse_block[reg.address] = reg.default
+                else:
+                    di_sequential.append(reg.address)
+            elif reg.type == 'co' and reg.address is not None:
+                if self.sparse:
+                    co_sparse_block[reg.address] = reg.default
+                else:
+                    co_sequential.append(reg.address)
+        if self.sparse:
+            hr_block = ModbusSparseDataBlock(hr_sparse_block)
+            ir_block = ModbusSparseDataBlock(ir_sparse_block)
+            di_block = ModbusSparseDataBlock(di_sparse_block)
+            co_block = ModbusSparseDataBlock(co_sparse_block)
+        else:
+            hr_sequential.sort()
+            hr_block = ModbusSequentialDataBlock(0, [0 for x in range(hr_sequential[0],
+                                                                      hr_sequential[len(hr_sequential)-1])])
+            ir_sequential.sort()
+            ir_block = ModbusSequentialDataBlock(0, [0 for x in range(ir_sequential[0],
+                                                                      ir_sequential[len(ir_sequential)-1])])
+            di_sequential.sort()
+            di_block = ModbusSequentialDataBlock(0, [0 for x in range(di_sequential[0],
+                                                                      di_sequential[len(di_sequential)-1])])
+            co_sequential.sort()
+            co_block = ModbusSequentialDataBlock(0, [0 for x in range(co_sequential[0],
+                                                                      co_sequential[len(co_sequential)-1])])
+        self.context = ModbusSlaveContext(hr=hr_block, ir=ir_block, di=di_block, co=co_block, zero_mode=self.zero_mode)
+
+    class Register(object):
+        """"""
+        def __init__(self, paramId=None, address=None, length=1, name=None, type=None, encoding=None,
+                     default=0, min=None, max=None, value=None):
+            self.paramId = paramId
+            self.address = address
+            self.length = length
+            self.name = name
+            self.type = type
+            self.encodings = ['uint8', 'uint16', 'uint32', 'int8', 'int16', 'int32', 'boolean', 'float32']
+            self.encoding = encoding
+            self.default = default
+            self.min = min if min is not None else self.get_range()[0]
+            self.max = max if max is not None else self.get_range()[1]
+            self.value = value
+
+        def get_range(self):
+            min = None
+            max = None
+            if self.encoding is not None:
+                if 'uint' in self.encoding[0:len('uint')]:
+                    min = 0
+                    bits = int(self.encoding[len('uint'):])
+                    max = 2**bits - 1
+                elif 'int' in self.encoding[0:len('int')]:
+                    bits = int(self.encoding[len('int'):])
+                    min = -(2**bits/2)
+                    max = (2**bits/2) - 1
+                elif self.encoding == 'boolean':
+                    min = 0
+                    max = 1
+            return min, max
+
+        def get_function_code(self, read=True):
+            """
+            Gets the Modbus function code for the register type and read/write operation.
+
+            :param read: read/write
+            :return: Modbus function code
+
+            """
+            if self.type in ['hr', 'co']:
+                if read:
+                    return READ_HR if self.type == 'hr' else READ_CO
+                else:
+                    return WRITE_SINGLE_HR if self.type == 'hr' else WRITE_SINGLE_CO
+            elif self.type in ['ir', 'di']:
+                if read:
+                    return READ_IR if self.type == 'ir' else READ_DI
+                else:
+                    raise EnvironmentError("Illegal operation cannot write to {type}".format(type=self.type))
+
 
 
 # From: https://github.com/SimplyAutomationized/modbus-tcp-tutorials/blob/master/tempSensors.py
@@ -165,7 +463,7 @@ class CallbackDataBlock(ModbusSparseDataBlock):
 '''
 
 
-def get_slave_context(device='Default'):
+def get_slave_context(device='DEFAULT'):
     """
     Creates a Modbus slave context based on an input template
 
@@ -174,7 +472,7 @@ def get_slave_context(device='Default'):
 
     """
     log.debug("Getting slave context")
-    supported_devices = ['Default']
+    supported_devices = ['DEFAULT']
     if device not in supported_devices:
         raise EnvironmentError("Unsupported Device Template: " + device)
     default_hr = 10000
@@ -196,29 +494,31 @@ def get_slave_context(device='Default'):
         raise NotImplementedError('Target Modbus device not supported.')
 
 
-def update_values(server_contexts):
+def update_values(server_context, slaves):
     """
     Updates the configured register values in the Modbus context.
-    Increments 5 input register values starting at address 0x00, by 1
+    Increments or toggles values
 
     .. todo::
-       INCOMPLETE, scale up and support device templates
+       Support device simulation templates
 
-    :param server_contexts: a ``ModbusServerContext``
+    :param server_context: a ``ModbusServerContext`` object
+    :param slaves: a list of ``Slave`` objects
 
     """
-    context = server_contexts[0]
-    function_code = READ_IR
-    slave_id = 0x01
-    address = 0x00
-    count = 5
-    get_values = context[slave_id].getValues(function_code, address, count=count)
-    set_values = [v + 1 for v in get_values]
-    # TODO: structure a more meaningful information output for updated registers
-    log.info("Modbus slave updating Slave:{slave} Function:{func} Address:{add}. New values:{vals}".format(
-        slave=slave_id, func=function_code, add=address, vals=str(set_values).replace(',', ' ')
-    ))
-    context[slave_id].setValues(function_code, address, set_values)
+    context = server_context
+    for slave in slaves:
+        slave_id = slave.slave_id
+        for reg in slave.registers:
+            func = reg.get_function_code()
+            old_value = context[slave_id].getValues(func, reg.address, count=1)[0]   # ignore reg.length, no striping
+            if reg.type in ['hr', 'ir']:
+                new_value = old_value + 1 if old_value < reg.max or reg.max is None else reg.min
+            else:
+                new_value = 0 if old_value == 1 else 1
+            log.info("Modbus slave updating Slave:{slave} Function:{func} Address:{add} New values:{val}".format(
+                slave=slave_id, func=func, add=reg.address, val=str(new_value).replace(',', ' ')))
+            context[slave_id].setValues(func, reg.address, [new_value])
 
 
 def list_serial_ports():
@@ -237,8 +537,7 @@ def list_serial_ports():
     elif sys.platform.startswith('darwin'):
         ports = glob.glob('/dev/tty.*')
     else:
-        raise EnvironmentError('Unsupported platform')
-
+        raise EnvironmentError("Unsupported OS/platform")
     result = []
     for port in ports:
         try:
@@ -252,11 +551,35 @@ def list_serial_ports():
 
 class SerialPort(object):
     def __init__(self, port='/dev/ttyUSB0', baudrate=9600, bytesize=8, parity='none', stopbits=1):
-        self.port = port
-        self.baudrate = baudrate
-        self.bytesize = bytesize
-        self.parity = parity
-        self.stopbits = stopbits
+        if port in list_serial_ports():
+            self.port = port
+            self.baudrate = baudrate
+            self.baudrates = [2400, 4800, 9600, 19200, 38400, 57600, 115200]
+            self.bytesize = bytesize
+            self.parity = parity
+            self.stopbits = stopbits
+            self.timeout = None
+            self.write_timeout = None
+            self.inter_byte_timeout = None
+            self.xonxoff = False
+            self.rtscts = False
+            self.dsrdtr = False
+        else:
+            raise EnvironmentError("Unable to find specified serial port {port}".format(port=port))
+
+    def set_bps(self, shorthand):
+        baudrate = int(shorthand.split("-")[0])
+        framing = shorthand.split("-")[1]
+        if baudrate in self.baudrates:
+            self.baudrate = baudrate
+        else:
+            log.error("Attempt to configure unsupported baud rate {num}".format(num=baudrate))
+        if framing == '8N1':
+            self.bytesize = 8
+            self.parity = 'none'
+            self.stopbits = 1
+        else:
+            log.error("Attempt to configure unsupported framing {config}".format(config=framing))
 
 
 def get_parser():
@@ -269,6 +592,9 @@ def get_parser():
     parser = argparse.ArgumentParser(description="Modbus Slave Device.")
 
     port_choices = list_serial_ports() + ['tcp', 'udp']
+
+    parser.add_argument('-t', '--template', dest='template', default='DEFAULT',
+                        help="the template file to use")
 
     parser.add_argument('-p', '--port', dest='port', default=PORT_DEFAULT,
                         choices=port_choices,
@@ -306,6 +632,7 @@ def run_async_server():
     user_options = parser.parse_args()
     TCP_PORT = 502
     UDP_PORT = 5020
+
     # ----------------------------------------------------------------------- #
     # initialize your data store
     # ----------------------------------------------------------------------- #
@@ -361,51 +688,43 @@ def run_async_server():
     #     store = ModbusSlaveContext(..., zero_mode=True)
     # ----------------------------------------------------------------------- #
 
+    # slaves = {
+    #     0x01: get_slave_context(),
+    # }
+    slave = Slave(template=user_options.template)
     slaves = {
-        0x01: get_slave_context(),
+        slave.slave_id: slave.context
     }
     context = ModbusServerContext(slaves=slaves, single=False)
-    # slaves = get_slave_context()
-    # context = ModbusServerContext(slaves=slaves, single=True)
-
-    # initialize the server information (else defaulted to empty strings)
-    identity = ModbusDeviceIdentification()
-    identity.VendorName = 'PyModbus'
-    identity.ProductCode = 'PM'
-    identity.VendorUrl = 'http://github.com/bashwork/pymodbus/'
-    identity.ProductName = 'Pymodbus Server'
-    identity.ModelName = 'Pymodbus Server'
-    identity.MajorMinorRevision = pymodbus_version
 
     # Set up looping call to update values
     UPDATE_INTERVAL = 5
-    slave_updater = RepeatingTimer(seconds=UPDATE_INTERVAL, name='slave_updater',
-                                   callback=update_values, args=(context,), defer=True)
+    slave_list = [slave]
+    slave_updater = RepeatingTimer(seconds=UPDATE_INTERVAL, name='slave_updater', defer=True,
+                                   callback=update_values, **{'server_context': context, 'slaves': slave_list})
     slave_updater.start_timer()
 
-    if user_options.mode == 'tcp' or user_options.mode is None and user_options.port.lower() == 'tcp':
+    if (slave.mode == 'tcp' or user_options.mode == 'tcp'
+            or user_options.mode is None and user_options.port.lower() == 'tcp'):
         framer = ModbusSocketFramer
-    elif user_options.mode == 'ascii':
+    elif slave.mode == 'ascii' or user_options.mode == 'ascii':
         framer = ModbusAsciiFramer
     else:
         framer = ModbusRtuFramer
 
     # TODO: trap master connect/disconnect as INFO logs rather than DEBUG (default of pyModbus)
     if user_options.port.lower() == 'tcp':
-        StartTcpServer(context, identity=identity, address=("localhost", TCP_PORT), framer=framer)
+        StartTcpServer(context, identity=slave.identity, address=("localhost", TCP_PORT), framer=framer)
     elif user_options.port.lower() == 'udp':
-        StartUdpServer(context, identity=identity, address=("127.0.0.1", UDP_PORT), framer=framer)
+        StartUdpServer(context, identity=slave.identity, address=("127.0.0.1", UDP_PORT), framer=framer)
     else:
-        if user_options.port in list_serial_ports():
-            ser = SerialPort()
-            StartSerialServer(context, identity=identity, framer=framer,
-                              port=ser.port,
-                              baudrate=ser.baudrate,
-                              bytesize=ser.bytesize,
-                              parity=ser.parity,
-                              stopbits=ser.stopbits,)  # need timeout=X?
-        else:
-            raise EnvironmentError('Unable to find specified serial port ' + user_options.port)
+        ser = SerialPort()
+        StartSerialServer(context, identity=slave.identity, framer=framer,
+                          port=ser.port,
+                          baudrate=ser.baudrate,
+                          bytesize=ser.bytesize,
+                          parity=ser.parity,
+                          stopbits=ser.stopbits,)  # need timeout=X?
     # '''
 
 

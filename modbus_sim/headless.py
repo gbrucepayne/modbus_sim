@@ -60,8 +60,8 @@ class RepeatingTimer(threading.Thread):
     :param tick_log: verbose logging of tick count
 
     """
-    def __init__(self, seconds, name=None, sleep_chunk=0.25, defer=True,
-                 callback=None, args=(), kwargs=(), tick_log=False):
+    def __init__(self, seconds, name=None, sleep_chunk=0.25, defer=True, tick_log=False,
+                 callback=None, *args, **kwargs):
         """
         Initialization of the subclass.
 
@@ -98,7 +98,7 @@ class RepeatingTimer(threading.Thread):
     def run(self):
         """Counts down the interval, checking every ``sleep_chunk`` the desired state."""
         if not self.defer:
-            self.callback(self.callback_args)
+            self.callback(*self.callback_args, **self.callback_kwargs)
         while not self.terminate_event.is_set():
             while self.count > 0 and self.start_event.is_set() and self.interval > 0:
                 if self.tick_log:
@@ -110,7 +110,7 @@ class RepeatingTimer(threading.Thread):
                     self.count = self.interval / self.sleep_chunk
                 self.count -= 1
                 if self.count <= 0:
-                    self.callback(self.callback_args)
+                    self.callback(*self.callback_args, **self.callback_kwargs)
                     self.count = self.interval / self.sleep_chunk
 
     def start_timer(self):
