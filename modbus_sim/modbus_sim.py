@@ -46,6 +46,10 @@ from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSparseDataBlock
 from pymodbus.datastore import ModbusSlaveContext, ModbusServerContext
 from pymodbus.transaction import ModbusRtuFramer, ModbusAsciiFramer, ModbusSocketFramer
 
+from pymodbus.constants import Endian
+from pymodbus.payload import BinaryPayloadBuilder
+from pymodbus.payload import BinaryPayloadDecoder
+
 PORT_DEFAULT = 'tcp'
 
 # --------------------------------------------------------------------------- #
@@ -121,7 +125,9 @@ class Slave(object):
     Data model for a Modbus Slave (e.g. RTU, PLC)
 
     .. todo::
-       Document template format
+
+       * Document template format.
+       * Does Slave or RegisterBlock need to hold the ModbusServerContext to read/write values?
 
     :param template: a specifically formatted template or file
 
@@ -145,6 +151,7 @@ class Slave(object):
         self.context = None
         self.parse_template()
         self.sparse = False
+        # self.builder = BinaryPayloadBuilder(byteorder=Endian.Big, wordorder=Endian.Big)
 
     def parse_template(self):
         if self.template == 'DEFAULT':
@@ -219,7 +226,7 @@ class Slave(object):
                         else:
                             log.error("Undefined parity {parity}".format(parity=parity))
             elif line[0:len(TEMPLATE_PARSER_REG_DESC)] == TEMPLATE_PARSER_REG_DESC:
-                reg = self.Register()
+                reg = self.RegisterBlock(parent=self)
                 reg_desc = line.split(TEMPLATE_PARSER_SEPARATOR)
                 for i in reg_desc:
                     if i[0:len('paramId')] == 'paramId':
@@ -247,7 +254,7 @@ class Slave(object):
                             if paramId == reg.paramId:
                                 reg_exists = True
                         if not reg_exists:
-                            reg = self.Register(paramId=paramId)
+                            reg = self.RegisterBlock(parent=self, paramId=paramId)
                             self.registers.append(reg)
                             reg_exists = True
                         this_reg = paramId
@@ -258,7 +265,7 @@ class Slave(object):
                                 if reg.paramId == this_reg:
                                     reg.address = addr
                             if not reg_exists:
-                                reg = self.Register(address=addr)
+                                reg = self.RegisterBlock(parent=self, address=addr)
                                 self.registers.append(reg)
                                 reg_exists = True
                         else:
@@ -298,7 +305,6 @@ class Slave(object):
                                     reg.default = float(reg.default) if enc == 'float32' else int(reg.default)
                         else:
                             log.error("Unsupported encoding {type}".format(type=enc))
-
         hr_sequential = []
         hr_sparse_block = {}
         ir_sequential = []
@@ -309,29 +315,31 @@ class Slave(object):
         co_sparse_block = {}
         for reg in self.registers:
             if reg.min is None:
-                reg.min = reg.get_range()[0]
+                reg.min = reg._get_range()[0]
             if reg.max is None:
-                reg.max = reg.get_range()[1]
+                reg.max = reg._get_range()[1]
             if reg.type == 'hr' and reg.address is not None:
                 if self.sparse:
-                    hr_sparse_block[reg.address] = reg.default
+                    hr_sparse_block[reg.address] = 0
                 else:
                     hr_sequential.append(reg.address)
             elif reg.type == 'ir' and reg.address is not None:
                 if self.sparse:
-                    ir_sparse_block[reg.address] = reg.default
+                    ir_sparse_block[reg.address] = 0
                 else:
                     ir_sequential.append(reg.address)
             elif reg.type == 'di' and reg.address is not None:
                 if self.sparse:
-                    di_sparse_block[reg.address] = reg.default
+                    di_sparse_block[reg.address] = 0
                 else:
                     di_sequential.append(reg.address)
             elif reg.type == 'co' and reg.address is not None:
                 if self.sparse:
-                    co_sparse_block[reg.address] = reg.default
+                    co_sparse_block[reg.address] = 0
                 else:
                     co_sequential.append(reg.address)
+            else:
+                log.error("Unhandled exception register {reg} addr=".format(reg=reg.name, addr=str(reg.address)))
         if self.sparse:
             hr_block = ModbusSparseDataBlock(hr_sparse_block)
             ir_block = ModbusSparseDataBlock(ir_sparse_block)
@@ -351,24 +359,35 @@ class Slave(object):
             co_block = ModbusSequentialDataBlock(0, [0 for x in range(co_sequential[0],
                                                                       co_sequential[len(co_sequential)-1])])
         self.context = ModbusSlaveContext(hr=hr_block, ir=ir_block, di=di_block, co=co_block, zero_mode=self.zero_mode)
+        for reg in self.registers:
+            reg.set_value(reg.default)
 
-    class Register(object):
-        """"""
-        def __init__(self, paramId=None, address=None, length=1, name=None, type=None, encoding=None,
-                     default=0, min=None, max=None, value=None):
+    class RegisterBlock(object):
+        """
+        .. todo::
+           docstring
+        """
+        def __init__(self, parent, paramId=None, address=None, length=1, name=None, type=None, encoding=None,
+                     default=0, min=None, max=None):
+            self.parent = parent
             self.paramId = paramId
             self.address = address
             self.length = length
             self.name = name
+            self.types = ['hr', 'ir', 'di', 'co']
             self.type = type
             self.encodings = ['uint8', 'uint16', 'uint32', 'int8', 'int16', 'int32', 'boolean', 'float32']
             self.encoding = encoding
             self.default = default
-            self.min = min if min is not None else self.get_range()[0]
-            self.max = max if max is not None else self.get_range()[1]
-            self.value = value
+            self.min = min if min is not None else self._get_range()[0]
+            self.max = max if max is not None else self._get_range()[1]
+            # TODO: get Endianness from template
+            self.byteorder=Endian.Big
+            self.wordorder=Endian.Big
+            self.value = None
 
-        def get_range(self):
+        def _get_range(self):
+            """Gets nominal max/min ranges based on encoding type"""
             min = None
             max = None
             if self.encoding is not None:
@@ -404,6 +423,62 @@ class Slave(object):
                 else:
                     raise EnvironmentError("Illegal operation cannot write to {type}".format(type=self.type))
 
+        def get_value(self):
+            values = self.parent.context.getValues(self.get_function_code(), self.address, self.length)
+            decoder = BinaryPayloadDecoder.fromRegisters(registers=values,
+                                                         byteorder=self.byteorder, wordorder=self.wordorder)
+            if self.encoding in ['int8', 'uint8']:
+                decoded = decoder.decode_8bit_int() if self.encoding == 'int8' else decoder.decode_8bit_uint()
+            elif self.encoding in ['int16', 'uint16']:
+                decoded = decoder.decode_16bit_int() if self.encoding == 'int16' else decoder.decode_16bit_uint()
+            elif self.encoding in ['int32', 'uint32']:
+                decoded = decoder.decode_32bit_int() if self.encoding == 'int32' else decoder.decode_32bit_uint()
+            elif self.encoding in ['float32', 'float64']:
+                decoded = decoder.decode_32bit_float() if self.encoding == 'float32' else decoder.decode_64bit_float()
+            elif self.encoding in ['int64', 'uint64']:
+                decoded = decoder.decode_64bit_int() if self.encoding == 'int64' else decoder.decode_64bit_uint()
+            elif self.encoding == 'boolean':
+                decoded = decoder.decode_16bit_uint()
+            elif self.encoding == 'string':
+                decoded = decoder.decode_string()
+            else:
+                log.error("Unhandled encoding exception {enc}".format(enc=self.encoding))
+                decoded = None
+            log.info("Read {type} {addr} as {enc} {val} from {list}".format(type=self.type, addr=self.address,
+                                                                            enc=self.encoding, val=decoded,
+                                                                            list=str(values)))
+            self.value = decoded
+            return decoded
+
+        def set_value(self, value):
+            if value is not None:
+                builder = BinaryPayloadBuilder(byteorder=self.byteorder, wordorder=self.wordorder)
+                if self.encoding in ['int8', 'uint8']:
+                    builder.add_8bit_int(value) if self.encoding == 'int8' else builder.add_8bit_uint(value)
+                elif self.encoding in ['int16', 'uint16']:
+                    builder.add_16bit_int(value) if self.encoding == 'int16' else builder.add_16bit_uint(value)
+                elif self.encoding in ['int32', 'uint32']:
+                    builder.add_32bit_int(value) if self.encoding == 'int32' else builder.add_32bit_uint(value)
+                elif self.encoding in ['float32', 'float64']:
+                    builder.add_32bit_float(value) if self.encoding == 'float32' else builder.add_64bit_float(value)
+                elif self.encoding in ['int64', 'uint64']:
+                    builder.add_64bit_int(value) if self.encoding == 'int64' else builder.add_64bit_uint(value)
+                elif self.encoding == 'boolean':
+                    builder.add_16bit_uint(value)
+                elif self.encoding == 'string':
+                    builder.add_string(value)
+                else:
+                    log.error("Unhandled encoding exception {enc}".format(enc=self.encoding))
+                payload = builder.to_registers()
+                log.info("Setting {type} {addr} to {enc} {val} as {list}".format(type=self.type, addr=self.address,
+                                                                                 enc=self.encoding, val=value,
+                                                                                 list=str(payload)))
+                self.parent.context.setValues(self.get_function_code(), self.address, payload)
+                self.value = value
+            else:
+                log.warning("Attempt to set {type} {addr} to None (default={default})".format(type=self.type,
+                                                                                              addr=self.address,
+                                                                                              default=self.default))
 
 
 # From: https://github.com/SimplyAutomationized/modbus-tcp-tutorials/blob/master/tempSensors.py
@@ -467,6 +542,9 @@ def get_slave_context(device='DEFAULT'):
     """
     Creates a Modbus slave context based on an input template
 
+    .. note::
+       DEPRECATED / UNUSED
+
     :param device: a device template
     :return: ModbusSlaveContext
 
@@ -500,25 +578,23 @@ def update_values(server_context, slaves):
     Increments or toggles values
 
     .. todo::
-       Support device simulation templates
+
+       * Proper striping of large values across 16-bit registers.
+       * Support device simulation templates.
 
     :param server_context: a ``ModbusServerContext`` object
     :param slaves: a list of ``Slave`` objects
 
     """
-    context = server_context
+    # context = server_context
     for slave in slaves:
-        slave_id = slave.slave_id
         for reg in slave.registers:
-            func = reg.get_function_code()
-            old_value = context[slave_id].getValues(func, reg.address, count=1)[0]   # ignore reg.length, no striping
+            old_value = reg.get_value()
             if reg.type in ['hr', 'ir']:
                 new_value = old_value + 1 if old_value < reg.max or reg.max is None else reg.min
             else:
                 new_value = 0 if old_value == 1 else 1
-            log.info("Modbus slave updating Slave:{slave} Function:{func} Address:{add} New values:{val}".format(
-                slave=slave_id, func=func, add=reg.address, val=str(new_value).replace(',', ' ')))
-            context[slave_id].setValues(func, reg.address, [new_value])
+            reg.set_value(new_value)
 
 
 def list_serial_ports():
